@@ -3,7 +3,7 @@ only:
 #
 steps:
     - name: build
-      image: golang:1.25.1
+      image: golang:1.25.6
       commands:
           - go mod tidy
           - go build -v ./...
