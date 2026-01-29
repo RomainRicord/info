@@ -22,7 +22,7 @@ type HealthResponse struct {
 	Code   int    `json:"code"`
 }
 
-// corsMiddleware ajoute les headers CORS
+// corsMiddleware ajoute les headers CORS test
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		allowedOrigins := os.Getenv("ALLOWED_ORIGINS")
