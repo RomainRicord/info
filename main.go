@@ -65,18 +65,18 @@ func infoHandler(w http.ResponseWriter, r *http.Request) {
 		queryType = "system"
 	}
 
-	var data map[string]interface{}
+	var data map[string]any
 
 	switch strings.ToLower(queryType) {
 	case "system":
-		data = map[string]interface{}{
+		data = map[string]any{
 			"hostname":    os.Getenv("HOSTNAME"),
 			"port":        os.Getenv("PORT"),
 			"environment": os.Getenv("ENVIRONMENT"),
 			"version":     "1.0.0",
 		}
 	case "timestamp":
-		data = map[string]interface{}{
+		data = map[string]any{
 			"timestamp": getCurrentTimestamp(),
 		}
 	default:
