@@ -32,12 +32,10 @@ steps:
               # 🔹 2. Déploie la nouvelle version
               docker run -d \
                 --name info_go_container \
-                -p 127.0.0.1:8090:8090 \
-                --env DATABASE_URL=$DATABASE_URL \
-                --env SUPABASE_JWT_SECRET=$SUPABASE_JWT_SECRET \
+                -p 127.0.0.1:8091:8091 \
+                --env PORT=8091 \
                 --env ALLOWED_ORIGINS=$ALLOWED_ORIGINS \
-                --env PORT=8090 \
-                --env OPAQUE_SERVER_ID=$OPAQUE_SERVER_ID \
+                --env ENVIRONMENT=$ENVIRONMENT \
                 info_go || exit 1
 
               # 🔹 3. Vérifie si le nouveau conteneur tourne bien
