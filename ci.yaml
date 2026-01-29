@@ -1,0 +1,64 @@
+only:
+    branch: main
+#
+steps:
+    - name: build
+      image: golang:1.25.1
+      commands:
+          - go mod tidy
+          - go build -v ./...
+
+    - name: docker
+      image: docker:27
+      commands:
+          - docker build -t info_go .
+
+    - name: deploy
+      image: docker:27
+      commands:
+          - |
+              echo "🚀 Deploying new container..."
+
+              # 🔹 1. Sauvegarde de l'ancien conteneur s'il existe
+              if [ "$(docker ps -q -f name=info_go_container)" ]; then
+                echo "📦 Sauvegarde de l'ancien conteneur..."
+                docker stop info_go_container || true
+                docker rm -f info_go_backup || true
+                docker rename info_go_container info_go_backup || true
+              else
+                echo "ℹ️ Aucun conteneur existant à sauvegarder."
+              fi
+
+              # 🔹 2. Déploie la nouvelle version
+              docker run -d \
+                --name info_go_container \
+                -p 127.0.0.1:8090:8090 \
+                --env DATABASE_URL=$DATABASE_URL \
+                --env SUPABASE_JWT_SECRET=$SUPABASE_JWT_SECRET \
+                --env ALLOWED_ORIGINS=$ALLOWED_ORIGINS \
+                --env PORT=8090 \
+                --env OPAQUE_SERVER_ID=$OPAQUE_SERVER_ID \
+                info_go || exit 1
+
+              # 🔹 3. Vérifie si le nouveau conteneur tourne bien
+              echo "🔍 Vérification du nouveau conteneur..."
+              sleep 5
+              if [ "$(docker ps -q -f name=info_go_container)" ]; then
+                echo "✅ Nouveau conteneur opérationnel."
+                docker rm -f info_go_backup || true
+              else
+                echo "❌ Nouveau conteneur défaillant, rollback..."
+                echo "📜 Logs du conteneur en erreur :"
+                docker logs info_go_container || echo "⚠️ Aucun log dispo"
+                docker rm -f info_go_container || true
+                if [ "$(docker ps -aq -f name=info_go_backup)" ]; then
+                  docker rename info_go_backup info_go_container || true
+                  docker start info_go_container || true
+                  echo "🔁 Rollback terminé."
+                else
+                  echo "⚠️ Aucun backup disponible pour rollback."
+                fi
+                exit 1
+              fi
+
+              echo "✅ Déploiement terminé avec succès"
