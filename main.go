@@ -10,10 +10,10 @@ import (
 
 // InfoResponse structure pour les réponses API
 type InfoResponse struct {
-	Status  string      `json:"status"`
-	Message string      `json:"message"`
-	Data    interface{} `json:"data,omitempty"`
-	Error   string      `json:"error,omitempty"`
+	Status  string `json:"status"`
+	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 // HealthResponse structure pour le health check
