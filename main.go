@@ -8,7 +8,19 @@ import (
 	"strings"
 )
 
-// InfoResponse structure pour les réponses API
+// --- Structures de Données ---
+
+// EntrepriseResponse : Structure exacte attendue par ton TypeScript
+type EntrepriseResponse struct {
+	Denomination         string `json:"denomination"`
+	NomComplet           string `json:"nom_complet,omitempty"` // Fallback
+	AdressePostaleLegale struct {
+		Ville      string `json:"ville"`
+		CodePostal string `json:"code_postal"`
+	} `json:"adresse_postale_legale"`
+}
+
+// InfoResponse : Structure existante pour /info
 type InfoResponse struct {
 	Status  string `json:"status"`
 	Message string `json:"message"`
@@ -16,100 +28,93 @@ type InfoResponse struct {
 	Error   string `json:"error,omitempty"`
 }
 
-// HealthResponse structure pour le health check
+// HealthResponse : Structure existante pour /health
 type HealthResponse struct {
 	Status string `json:"status"`
 	Code   int    `json:"code"`
 }
 
-// corsMiddleware ajoute les headers CORS
+// --- Middlewares ---
+
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		allowedOrigins := os.Getenv("ALLOWED_ORIGINS")
 		if allowedOrigins == "" {
 			allowedOrigins = "*"
 		}
-
 		w.Header().Set("Access-Control-Allow-Origin", allowedOrigins)
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		w.Header().Set("Access-Control-Max-Age", "3600")
 
-		// Gérer les requêtes OPTIONS (preflight)
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-
 		next.ServeHTTP(w, r)
 	})
 }
 
-// healthHandler endpoint de health check
-func healthHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	response := HealthResponse{
-		Status: "ok",
-		Code:   200,
-	}
-	json.NewEncoder(w).Encode(response)
-}
+// --- Handlers ---
 
-// infoHandler endpoint pour récupérer des infos simples
-func infoHandler(w http.ResponseWriter, r *http.Request) {
+// entrepriseHandler : Reçoit le SIRET et renvoie les infos de l'entreprise
+func entrepriseHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	// Récupérer un paramètre query optionnel
-	queryType := r.URL.Query().Get("type")
-	if queryType == "" {
-		queryType = "system"
-	}
-
-	var data map[string]any
-
-	switch strings.ToLower(queryType) {
-	case "system":
-		data = map[string]any{
-			"hostname":    os.Getenv("HOSTNAME"),
-			"port":        os.Getenv("PORT"),
-			"environment": os.Getenv("ENVIRONMENT"),
-			"version":     "1.0.0",
-		}
-	case "timestamp":
-		data = map[string]any{
-			"timestamp": getCurrentTimestamp(),
-		}
-	default:
+	// Extraction du SIRET depuis l'URL : /api/entreprise/123456789
+	// On retire le préfixe pour garder juste le numéro
+	siret := strings.TrimPrefix(r.URL.Path, "/api/entreprise/")
+	
+	if siret == "" || siret == "/" {
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(InfoResponse{
-			Status: "error",
-			Error:  "Type de requête non supporté",
-		})
+		json.NewEncoder(w).Encode(map[string]string{"error": "SIRET manquant"})
 		return
 	}
 
+	log.Printf("🔍 Recherche demandée pour le SIRET : %s", siret)
+
+	// --- SIMULATION DE DONNÉES (MOCK) ---
+	// C'est ici que tu appelleras plus tard l'API INSEE réelle.
+	// Pour l'instant, on renvoie une réponse statique pour tester la connexion.
+	
+	response := EntrepriseResponse{
+		Denomination: "VINTAGE STANDARDS STUDIO",
+		AdressePostaleLegale: struct {
+			Ville      string `json:"ville"`
+			CodePostal string `json:"code_postal"`
+		}{
+			Ville:      "PARIS",
+			CodePostal: "75011",
+		},
+	}
+
+	// On encode la réponse en JSON pour le TypeScript
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(InfoResponse{
-		Status:  "success",
-		Message: "Infos récupérées avec succès",
-		Data:    data,
-	})
+	json.NewEncoder(w).Encode(response)
 }
 
-// getCurrentTimestamp retourne un timestamp formaté
-func getCurrentTimestamp() string {
-	// Implémentation simple - à adapter selon vos besoins
-	return "2026-01-29T00:00:00Z"
-}
-
-// errorHandler gère les routes non trouvées
-func errorHandler(w http.ResponseWriter, r *http.Request) {
+func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusNotFound)
-	json.NewEncoder(w).Encode(InfoResponse{
-		Status: "error",
-		Error:  "Route non trouvée",
-	})
+	json.NewEncoder(w).Encode(HealthResponse{Status: "ok", Code: 200})
+}
+
+func infoHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	queryType := r.URL.Query().Get("type")
+	if queryType == "" { queryType = "system" }
+
+	var data map[string]any
+	switch strings.ToLower(queryType) {
+	case "system":
+		data = map[string]any{"version": "1.0.0", "env": os.Getenv("ENVIRONMENT")}
+	case "timestamp":
+		data = map[string]any{"timestamp": "2026-02-02T12:00:00Z"}
+	default:
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(InfoResponse{Status: "error", Error: "Type inconnu"})
+		return
+	}
+	json.NewEncoder(w).Encode(InfoResponse{Status: "success", Data: data})
 }
 
 func main() {
@@ -118,20 +123,21 @@ func main() {
 		port = "8091"
 	}
 
-	// Créer le router avec CORS middleware
 	mux := http.NewServeMux()
+	
+	// Routes existantes
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/info", infoHandler)
-	mux.HandleFunc("/", errorHandler)
+	
+	// NOUVELLE ROUTE : Note le "/" à la fin pour capturer ce qui suit (le siret)
+	mux.HandleFunc("/api/entreprise/", entrepriseHandler)
 
 	handler := corsMiddleware(mux)
 
 	log.Printf("🚀 Serveur démarré sur :%s", port)
-	log.Printf("📍 GET /health - Vérifier l'état du serveur")
-	log.Printf("📍 GET /info?type=system - Récupérer les infos système")
-	log.Printf("📍 GET /info?type=timestamp - Récupérer le timestamp")
+	log.Printf("📍 Route active : GET /api/entreprise/{siret}")
 
 	if err := http.ListenAndServe(":"+port, handler); err != nil {
-		log.Fatalf("Erreur au démarrage du serveur: %v", err)
+		log.Fatalf("Erreur au démarrage: %v", err)
 	}
 }
