@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -16,25 +17,34 @@ const API_TOKEN = "3b8fe35c2885c14c1eaee3248c79472b"
 // --- STRUCTURES DE DONNÉES ---
 
 // 1. Ce que ton Front (React) attend
-// Note : Comme /exist ne renvoie pas l'adresse, les champs adresse seront vides.
 type EntrepriseResponse struct {
 	Denomination         string `json:"denomination"`
-	Siren                string `json:"siren"`      // Ajouté pour info
-	Siret                string `json:"siret"`      // Ajouté pour info
+	NomComplet           string `json:"nom_complet,omitempty"`
 	AdressePostaleLegale struct {
 		Ville      string `json:"ville"`
 		CodePostal string `json:"code_postal"`
 	} `json:"adresse_postale_legale"`
 }
 
-// 2. Ce que Societe.com renvoie via l'endpoint /exist
-type SocieteExistResponse struct {
-	Siren      string `json:"siren"`
-	SiretSiege string `json:"siretsiege"`
-	NumTVA     string `json:"numtva"`
-	Deno       string `json:"deno"`           // La raison sociale
-	Status     string `json:"status"`
-	ImmatInsee string `json:"immatinsee"`
+// 2. Ce que Societe.com renvoie (Structure large pour tout capturer)
+type SocieteComResponse struct {
+	Denomination        string `json:"denomination"`
+	DenominationUsuelle string `json:"denomination_usuelle"`
+	Enseigne            string `json:"enseigne"`
+	
+	// Cas 1 : Adresse à la racine
+	Adresse struct {
+		CodePostal string `json:"code_postal"`
+		Ville      string `json:"ville"`
+	} `json:"adresse"`
+	
+	// Cas 2 : Adresse dans un objet etablissement
+	Etablissement struct {
+		Adresse struct {
+			CodePostal string `json:"code_postal"`
+			Ville      string `json:"ville"`
+		} `json:"adresse"`
+	} `json:"etablissement"`
 }
 
 // Structures utilitaires
@@ -78,12 +88,11 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// --- LOGIQUE MÉTIER (Appel /exist) ---
+// --- LOGIQUE MÉTIER (Fetch API) ---
 
-func fetchSocieteExistData(numid string) (*EntrepriseResponse, error) {
-	// Construction de l'URL vers l'endpoint /exist
-	// numid peut être un SIREN ou un SIRET
-	url := fmt.Sprintf("https://api.societe.com/api/v1/entreprise/%s/exist", numid)
+func fetchSocieteComData(siret string) (*EntrepriseResponse, error) {
+	// Construction de l'URL
+	url := fmt.Sprintf("https://api.societe.com/api/v1/etablissement/%s", siret)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -102,33 +111,51 @@ func fetchSocieteExistData(numid string) (*EntrepriseResponse, error) {
 	}
 	defer resp.Body.Close()
 
-	// Gestion des erreurs
+	// --- SECTION DEBUG : Lecture de la réponse brute ---
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	
+	// AFFICHE LE JSON REÇU DANS LE TERMINAL (Pour vérifier si les champs sont vides ou non)
+	log.Printf("📢 RAW JSON Societe.com : %s", string(bodyBytes))
+
+	// Gestion des erreurs HTTP
 	if resp.StatusCode == 404 {
-		return nil, fmt.Errorf("entreprise introuvable (numid invalide)")
+		return nil, fmt.Errorf("SIRET introuvable")
 	}
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("erreur API distante : %d", resp.StatusCode)
 	}
 
-	// Parsing de la réponse /exist
-	var apiData SocieteExistResponse
-	if err := json.NewDecoder(resp.Body).Decode(&apiData); err != nil {
+	// Parsing
+	var apiData SocieteComResponse
+	// On utilise json.Unmarshal sur les bytes qu'on vient de lire
+	if err := json.Unmarshal(bodyBytes, &apiData); err != nil {
 		return nil, err
 	}
 
-	// Mapping vers le format Front
+	// Mapping
 	result := &EntrepriseResponse{}
-	
-	// On récupère le nom (deno)
-	result.Denomination = apiData.Deno
-	
-	// On renvoie aussi les identifiants si besoin
-	result.Siren = apiData.Siren
-	result.Siret = apiData.SiretSiege
 
-	// ⚠️ L'endpoint /exist ne donne PAS l'adresse (ville/CP). 
-	// On laisse donc AdressePostaleLegale vide ou on met une valeur par défaut si besoin.
-	
+	// Priorité nom
+	if apiData.Denomination != "" {
+		result.Denomination = apiData.Denomination
+	} else if apiData.DenominationUsuelle != "" {
+		result.Denomination = apiData.DenominationUsuelle
+	} else {
+		result.Denomination = apiData.Enseigne
+	}
+
+	// Priorité adresse (Racine vs Etablissement)
+	if apiData.Adresse.Ville != "" {
+		result.AdressePostaleLegale.Ville = apiData.Adresse.Ville
+		result.AdressePostaleLegale.CodePostal = apiData.Adresse.CodePostal
+	} else {
+		result.AdressePostaleLegale.Ville = apiData.Etablissement.Adresse.Ville
+		result.AdressePostaleLegale.CodePostal = apiData.Etablissement.Adresse.CodePostal
+	}
+
 	return result, nil
 }
 
@@ -137,28 +164,24 @@ func fetchSocieteExistData(numid string) (*EntrepriseResponse, error) {
 func entrepriseHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	// Extraction du paramètre (SIREN ou SIRET)
-	numid := strings.TrimPrefix(r.URL.Path, "/api/entreprise/")
-	
-	// Validation : On accepte 9 chiffres (SIREN) OU 14 chiffres (SIRET)
-	if len(numid) != 9 && len(numid) != 14 {
+	siret := strings.TrimPrefix(r.URL.Path, "/api/entreprise/")
+
+	// Validation 14 chiffres obligatoire pour l'endpoint /etablissement
+	if len(siret) != 14 {
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error": "Le paramètre doit être un SIREN (9 chiffres) ou un SIRET (14 chiffres)",
-		})
+		json.NewEncoder(w).Encode(map[string]string{"error": "Le SIRET doit contenir exactement 14 chiffres"})
 		return
 	}
 
-	log.Printf("🔍 Vérification existence (SIREN/SIRET) : %s", numid)
+	log.Printf("🔍 Appel API Societe.com pour le SIRET : %s", siret)
 
-	// Appel à la fonction /exist
-	data, err := fetchSocieteExistData(numid)
-	
+	data, err := fetchSocieteComData(siret)
+
 	if err != nil {
 		log.Printf("❌ Erreur : %v", err)
 		if strings.Contains(err.Error(), "introuvable") {
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Entreprise inconnue"})
+			json.NewEncoder(w).Encode(map[string]string{"error": "Entreprise introuvable"})
 		} else {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -166,7 +189,7 @@ func entrepriseHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("✅ Trouvé : %s (SIREN: %s)", data.Denomination, data.Siren)
+	log.Printf("✅ Données renvoyées : %s", data.Denomination)
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(data)
 }
@@ -195,7 +218,7 @@ func main() {
 	handler := corsMiddleware(mux)
 
 	log.Printf("🚀 Serveur démarré sur :%s", port)
-	log.Printf("📍 Route active : GET /api/entreprise/{siren_ou_siret}")
+	log.Printf("📍 Route active : GET /api/entreprise/{siret} (14 chiffres)")
 
 	if err := http.ListenAndServe(":"+port, handler); err != nil {
 		log.Fatalf("Erreur au démarrage: %v", err)
