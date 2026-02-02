@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -13,10 +11,12 @@ import (
 )
 
 // --- CONSTANTES ---
-// Ton token est intégré ici pour simplifier le déploiement
+// Ton token API Societe.com
 const API_TOKEN = "3b8fe35c2885c14c1eaee3248c79472b"
 
-// --- 1. Structures de réponse (Vers le Frontend React) ---
+// --- STRUCTURES DE DONNÉES ---
+
+// 1. Ce que ton Front (React) attend
 type EntrepriseResponse struct {
 	Denomination         string `json:"denomination"`
 	NomComplet           string `json:"nom_complet,omitempty"`
@@ -26,30 +26,30 @@ type EntrepriseResponse struct {
 	} `json:"adresse_postale_legale"`
 }
 
-// --- 2. Structures de réception (Depuis Societe.com) ---
+// 2. Ce que Societe.com renvoie (Structure partielle pour cibler ce qu'on veut)
 type SocieteComResponse struct {
 	Denomination        string `json:"denomination"`
 	DenominationUsuelle string `json:"denomination_usuelle"`
-	NomCommercial       string `json:"nom_commercial"`
 	Enseigne            string `json:"enseigne"`
-	// Societe.com met parfois l'adresse dans un objet imbriqué
+	// L'adresse peut être à la racine ou dans un objet imbriqué selon les cas
+	Adresse struct {
+		CodePostal string `json:"code_postal"`
+		Ville      string `json:"ville"`
+	} `json:"adresse"`
 	Etablissement struct {
 		Adresse struct {
 			CodePostal string `json:"code_postal"`
 			Ville      string `json:"ville"`
 		} `json:"adresse"`
 	} `json:"etablissement"`
-	// Ou parfois directement à la racine selon l'endpoint
-	Adresse struct {
-		CodePostal string `json:"code_postal"`
-		Ville      string `json:"ville"`
-	} `json:"adresse"`
 }
 
-// Structures utilitaires
+// Structures utilitaires existantes
 type InfoResponse struct {
-	Status string `json:"status"`
-	Data   any    `json:"data,omitempty"`
+	Status  string `json:"status"`
+	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 type HealthResponse struct {
@@ -57,9 +57,12 @@ type HealthResponse struct {
 	Code   int    `json:"code"`
 }
 
-// --- Middlewares (CORS) ---
+// --- MIDDLEWARES ---
+
+// CORS corrigé : Gère correctement la liste des origines
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Liste des domaines autorisés
 		allowedOrigins := []string{
 			"http://localhost:8082",
 			"https://vintagestandards.fr",
@@ -67,7 +70,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 		}
 
 		origin := r.Header.Get("Origin")
-		// Autorisation dynamique de l'origine
+		// On vérifie si l'origine est dans la liste
 		for _, allowed := range allowedOrigins {
 			if origin == allowed {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
@@ -82,15 +85,14 @@ func corsMiddleware(next http.Handler) http.Handler {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-
 		next.ServeHTTP(w, r)
 	})
 }
 
-// --- Logique Métier : Appel Societe.com ---
+// --- LOGIQUE MÉTIER (Appel Externe) ---
+
 func fetchSocieteComData(siret string) (*EntrepriseResponse, error) {
-	// 1. Construction de l'URL
-	// On utilise l'endpoint /etablissement car on a un SIRET
+	// Construction de l'URL vers l'API Societe.com
 	url := fmt.Sprintf("https://api.societe.com/api/v1/etablissement/%s", siret)
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -98,11 +100,11 @@ func fetchSocieteComData(siret string) (*EntrepriseResponse, error) {
 		return nil, err
 	}
 
-	// 2. Authentification avec ton Token
+	// Ajout du Token d'authentification
 	req.Header.Set("X-Authorization", "socapi "+API_TOKEN)
 	req.Header.Set("Accept", "application/json")
 
-	// 3. Exécution de la requête
+	// Exécution de la requête avec un timeout de 10s
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -110,49 +112,37 @@ func fetchSocieteComData(siret string) (*EntrepriseResponse, error) {
 	}
 	defer resp.Body.Close()
 
-	// 4. Lecture du corps de la réponse (Pour debug et parsing)
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
+	// Gestion des codes erreurs
+	if resp.StatusCode == 404 {
+		return nil, fmt.Errorf("SIRET introuvable")
+	}
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("erreur API distante : %d", resp.StatusCode)
+	}
+
+	// Parsing du JSON reçu de Societe.com
+	var apiData SocieteComResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiData); err != nil {
 		return nil, err
 	}
 
-	// DEBUG : Affiche ce que Societe.com renvoie vraiment dans la console
-	// log.Printf("📝 Réponse brute Societe.com : %s", string(bodyBytes))
-
-	// 5. Gestion des erreurs HTTP
-	if resp.StatusCode == 404 {
-		return nil, fmt.Errorf("entreprise introuvable sur Societe.com")
-	}
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("erreur API (%d): %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	// 6. Parsing du JSON
-	var apiData SocieteComResponse
-	if err := json.NewDecoder(bytes.NewReader(bodyBytes)).Decode(&apiData); err != nil {
-		return nil, fmt.Errorf("erreur parsing JSON: %v", err)
-	}
-
-	// 7. Mapping vers NOTRE structure (Adaptateur)
+	// Mapping des données (On transforme le format Societe.com vers ton format React)
 	result := &EntrepriseResponse{}
 
-	// Logique de récupération du nom (ordre de priorité)
+	// 1. Récupération du nom (On prend le premier qui n'est pas vide)
 	if apiData.Denomination != "" {
 		result.Denomination = apiData.Denomination
 	} else if apiData.DenominationUsuelle != "" {
 		result.Denomination = apiData.DenominationUsuelle
-	} else if apiData.Enseigne != "" {
-		result.Denomination = apiData.Enseigne
 	} else {
-		result.Denomination = "Nom Inconnu"
+		result.Denomination = apiData.Enseigne
 	}
 
-	// Logique de récupération de l'adresse
-	// On essaie d'abord à la racine, sinon dans l'objet etablissement
+	// 2. Récupération de l'adresse (Racine ou Etablissement)
 	if apiData.Adresse.Ville != "" {
 		result.AdressePostaleLegale.Ville = apiData.Adresse.Ville
 		result.AdressePostaleLegale.CodePostal = apiData.Adresse.CodePostal
-	} else if apiData.Etablissement.Adresse.Ville != "" {
+	} else {
 		result.AdressePostaleLegale.Ville = apiData.Etablissement.Adresse.Ville
 		result.AdressePostaleLegale.CodePostal = apiData.Etablissement.Adresse.CodePostal
 	}
@@ -160,30 +150,35 @@ func fetchSocieteComData(siret string) (*EntrepriseResponse, error) {
 	return result, nil
 }
 
-// --- Handler Principal ---
+// --- HANDLERS ---
+
 func entrepriseHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
+	// Extraction du SIRET
 	siret := strings.TrimPrefix(r.URL.Path, "/api/entreprise/")
-
-	// Validation basique
+	
+	// Validation simple de la longueur
 	if len(siret) != 14 {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Le SIRET doit contenir 14 chiffres"})
 		return
 	}
 
-	log.Printf("🔍 Recherche SIRET : %s", siret)
+	log.Printf("🔍 Appel API Societe.com pour le SIRET : %s", siret)
 
-	// APPEL RÉEL
+	// APPEL RÉEL À L'API
 	data, err := fetchSocieteComData(siret)
-
+	
 	if err != nil {
 		log.Printf("❌ Erreur : %v", err)
-		if strings.Contains(err.Error(), "introuvable") {
+		
+		// Si l'entreprise n'existe pas -> 404
+		if err.Error() == "SIRET introuvable" {
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Entreprise non trouvée"})
+			json.NewEncoder(w).Encode(map[string]string{"error": "Entreprise non trouvée sur Societe.com"})
 		} else {
+			// Autre erreur (réseau, token, serveur externe HS) -> 500
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		}
@@ -191,7 +186,7 @@ func entrepriseHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Succès
-	log.Printf("✅ Succès : %s (%s)", data.Denomination, data.AdressePostaleLegale.Ville)
+	log.Printf("✅ Données trouvées : %s - %s", data.Denomination, data.AdressePostaleLegale.Ville)
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(data)
 }
@@ -203,7 +198,21 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 
 func infoHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(InfoResponse{Status: "success", Data: map[string]string{"version": "1.0.0"}})
+	queryType := r.URL.Query().Get("type")
+	if queryType == "" { queryType = "system" }
+
+	var data map[string]any
+	switch strings.ToLower(queryType) {
+	case "system":
+		data = map[string]any{"version": "1.0.0", "env": os.Getenv("ENVIRONMENT")}
+	case "timestamp":
+		data = map[string]any{"timestamp": "2026-02-02T12:00:00Z"}
+	default:
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(InfoResponse{Status: "error", Error: "Type inconnu"})
+		return
+	}
+	json.NewEncoder(w).Encode(InfoResponse{Status: "success", Data: data})
 }
 
 func main() {
@@ -219,7 +228,9 @@ func main() {
 
 	handler := corsMiddleware(mux)
 
-	log.Printf("🚀 Serveur Proxy (avec Token Societe.com) démarré sur :%s", port)
+	log.Printf("🚀 Serveur démarré sur :%s", port)
+	log.Printf("📍 Route active : GET /api/entreprise/{siret}")
+
 	if err := http.ListenAndServe(":"+port, handler); err != nil {
 		log.Fatalf("Erreur au démarrage: %v", err)
 	}
