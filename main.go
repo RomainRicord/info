@@ -37,18 +37,41 @@ type HealthResponse struct {
 // --- Middlewares ---
 
 func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		allowedOrigins := "http://localhost:8082, https://vintagestandards.fr, https://dev.vintagestandards.fr"
-		w.Header().Set("Access-Control-Allow-Origin", allowedOrigins)
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        // 1. Liste des origines autorisées (Tableau de chaînes)
+        allowedOrigins := []string{
+            "http://localhost:8082",
+            "https://vintagestandards.fr",
+            "https://dev.vintagestandards.fr",
+        }
 
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+        // 2. Récupérer l'origine de la requête entrante
+        origin := r.Header.Get("Origin")
+
+        // 3. Vérifier si l'origine est dans la liste
+        for _, allowed := range allowedOrigins {
+            if origin == allowed {
+                // Si c'est bon, on renvoie EXACTEMENT cette origine seule
+                w.Header().Set("Access-Control-Allow-Origin", origin)
+                break
+            }
+        }
+
+        // Si tu es en pur développement local et que tu veux tout autoriser, 
+        // tu peux décommenter la ligne ci-dessous et commenter la boucle au-dessus :
+        // w.Header().Set("Access-Control-Allow-Origin", "*")
+
+        w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+        // Gérer les requêtes OPTIONS (preflight)
+        if r.Method == "OPTIONS" {
+            w.WriteHeader(http.StatusOK)
+            return
+        }
+
+        next.ServeHTTP(w, r)
+    })
 }
 
 // --- Handlers ---
