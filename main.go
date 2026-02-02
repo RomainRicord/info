@@ -38,10 +38,7 @@ type HealthResponse struct {
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		allowedOrigins := os.Getenv("ALLOWED_ORIGINS")
-		if allowedOrigins == "" {
-			allowedOrigins = "*"
-		}
+		allowedOrigins := "http://localhost:8082/, https://vintagestandards.fr, https://dev.vintagestandards.fr"
 		w.Header().Set("Access-Control-Allow-Origin", allowedOrigins)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
