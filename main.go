@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -13,28 +14,31 @@ import (
 // --- CONSTANTES ---
 const API_TOKEN = "3b8fe35c2885c14c1eaee3248c79472b"
 
-// --- Structures de Données ---
+// --- STRUCTURES DE DONNÉES ---
 
-// EntrepriseResponse : Structure exacte attendue par ton TypeScript
+// 1. Ce que ton Front (React) attend
 type EntrepriseResponse struct {
 	Denomination         string `json:"denomination"`
-	NomComplet           string `json:"nom_complet,omitempty"` // Fallback
+	NomComplet           string `json:"nom_complet,omitempty"`
 	AdressePostaleLegale struct {
 		Ville      string `json:"ville"`
 		CodePostal string `json:"code_postal"`
 	} `json:"adresse_postale_legale"`
 }
 
-// SocieteComResponse : Structure pour lire la réponse brute de Societe.com
+// 2. Ce que Societe.com renvoie (Structure large pour tout capturer)
 type SocieteComResponse struct {
 	Denomination        string `json:"denomination"`
 	DenominationUsuelle string `json:"denomination_usuelle"`
 	Enseigne            string `json:"enseigne"`
-	// L'adresse peut être à la racine ou dans un objet imbriqué selon les cas
+	
+	// Cas 1 : Adresse à la racine
 	Adresse struct {
 		CodePostal string `json:"code_postal"`
 		Ville      string `json:"ville"`
 	} `json:"adresse"`
+	
+	// Cas 2 : Adresse dans un objet etablissement
 	Etablissement struct {
 		Adresse struct {
 			CodePostal string `json:"code_postal"`
@@ -43,21 +47,18 @@ type SocieteComResponse struct {
 	} `json:"etablissement"`
 }
 
-// InfoResponse : Structure existante pour /info
+// Structures utilitaires
 type InfoResponse struct {
 	Status  string `json:"status"`
-	Message string `json:"message"`
 	Data    any    `json:"data,omitempty"`
-	Error   string `json:"error,omitempty"`
 }
 
-// HealthResponse : Structure existante pour /health
 type HealthResponse struct {
 	Status string `json:"status"`
 	Code   int    `json:"code"`
 }
 
-// --- Middlewares ---
+// --- MIDDLEWARES ---
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -68,7 +69,6 @@ func corsMiddleware(next http.Handler) http.Handler {
 		}
 
 		origin := r.Header.Get("Origin")
-		// Autorisation dynamique de l'origine
 		for _, allowed := range allowedOrigins {
 			if origin == allowed {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
@@ -88,7 +88,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// --- Logique Métier (Le Fetch API) ---
+// --- LOGIQUE MÉTIER (Fetch API) ---
 
 func fetchSocieteComData(siret string) (*EntrepriseResponse, error) {
 	// Construction de l'URL
@@ -99,17 +99,26 @@ func fetchSocieteComData(siret string) (*EntrepriseResponse, error) {
 		return nil, err
 	}
 
-	// Ajout du Token d'authentification
+	// Authentification
 	req.Header.Set("X-Authorization", "socapi "+API_TOKEN)
 	req.Header.Set("Accept", "application/json")
 
-	// Exécution de la requête avec timeout
+	// Exécution
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	// --- SECTION DEBUG : Lecture de la réponse brute ---
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	
+	// AFFICHE LE JSON REÇU DANS LE TERMINAL (Pour vérifier si les champs sont vides ou non)
+	log.Printf("📢 RAW JSON Societe.com : %s", string(bodyBytes))
 
 	// Gestion des erreurs HTTP
 	if resp.StatusCode == 404 {
@@ -119,16 +128,17 @@ func fetchSocieteComData(siret string) (*EntrepriseResponse, error) {
 		return nil, fmt.Errorf("erreur API distante : %d", resp.StatusCode)
 	}
 
-	// Parsing de la réponse Societe.com
+	// Parsing
 	var apiData SocieteComResponse
-	if err := json.NewDecoder(resp.Body).Decode(&apiData); err != nil {
+	// On utilise json.Unmarshal sur les bytes qu'on vient de lire
+	if err := json.Unmarshal(bodyBytes, &apiData); err != nil {
 		return nil, err
 	}
 
-	// Mapping vers la structure attendue par ton Front
+	// Mapping
 	result := &EntrepriseResponse{}
 
-	// 1. Logique de récupération du nom
+	// Priorité nom
 	if apiData.Denomination != "" {
 		result.Denomination = apiData.Denomination
 	} else if apiData.DenominationUsuelle != "" {
@@ -137,7 +147,7 @@ func fetchSocieteComData(siret string) (*EntrepriseResponse, error) {
 		result.Denomination = apiData.Enseigne
 	}
 
-	// 2. Logique de récupération de l'adresse (Racine ou Imbriqué)
+	// Priorité adresse (Racine vs Etablissement)
 	if apiData.Adresse.Ville != "" {
 		result.AdressePostaleLegale.Ville = apiData.Adresse.Ville
 		result.AdressePostaleLegale.CodePostal = apiData.Adresse.CodePostal
@@ -149,16 +159,14 @@ func fetchSocieteComData(siret string) (*EntrepriseResponse, error) {
 	return result, nil
 }
 
-// --- Handlers ---
+// --- HANDLERS ---
 
-// entrepriseHandler : Reçoit le SIRET, appelle Societe.com et renvoie le résultat
 func entrepriseHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	// 1. Extraction du SIRET depuis l'URL
 	siret := strings.TrimPrefix(r.URL.Path, "/api/entreprise/")
 
-	// 2. Validation : Un SIRET doit faire 14 caractères
+	// Validation 14 chiffres obligatoire pour l'endpoint /etablissement
 	if len(siret) != 14 {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Le SIRET doit contenir exactement 14 chiffres"})
@@ -167,28 +175,21 @@ func entrepriseHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("🔍 Appel API Societe.com pour le SIRET : %s", siret)
 
-	// 3. APPEL RÉEL (Plus de Mock ici !)
-	// On appelle la fonction fetchSocieteComData définie plus haut
 	data, err := fetchSocieteComData(siret)
 
 	if err != nil {
 		log.Printf("❌ Erreur : %v", err)
-
-		// Gestion fine des erreurs
-		if strings.Contains(err.Error(), "introuvable") || err.Error() == "SIRET introuvable" {
-			// Cas 404 : L'entreprise n'existe pas
+		if strings.Contains(err.Error(), "introuvable") {
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Entreprise introuvable pour ce SIRET"})
+			json.NewEncoder(w).Encode(map[string]string{"error": "Entreprise introuvable"})
 		} else {
-			// Cas 500 : Problème technique (Réseau, Token invalide, API en panne)
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Erreur serveur lors de la communication avec Societe.com"})
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		}
 		return
 	}
 
-	// 4. Succès : On renvoie les vraies données au format JSON
-	log.Printf("✅ Données renvoyées pour : %s", data.Denomination)
+	log.Printf("✅ Données renvoyées : %s", data.Denomination)
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(data)
 }
@@ -200,23 +201,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 
 func infoHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	queryType := r.URL.Query().Get("type")
-	if queryType == "" {
-		queryType = "system"
-	}
-
-	var data map[string]any
-	switch strings.ToLower(queryType) {
-	case "system":
-		data = map[string]any{"version": "1.0.0", "env": os.Getenv("ENVIRONMENT")}
-	case "timestamp":
-		data = map[string]any{"timestamp": "2026-02-02T12:00:00Z"}
-	default:
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(InfoResponse{Status: "error", Error: "Type inconnu"})
-		return
-	}
-	json.NewEncoder(w).Encode(InfoResponse{Status: "success", Data: data})
+	json.NewEncoder(w).Encode(InfoResponse{Status: "success", Data: map[string]string{"version": "1.0.0"}})
 }
 
 func main() {
@@ -226,18 +211,14 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-
-	// Routes existantes
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/info", infoHandler)
-
-	// NOUVELLE ROUTE : Note le "/" à la fin pour capturer ce qui suit (le siret)
 	mux.HandleFunc("/api/entreprise/", entrepriseHandler)
 
 	handler := corsMiddleware(mux)
 
 	log.Printf("🚀 Serveur démarré sur :%s", port)
-	log.Printf("📍 Route active : GET /api/entreprise/{siret}")
+	log.Printf("📍 Route active : GET /api/entreprise/{siret} (14 chiffres)")
 
 	if err := http.ListenAndServe(":"+port, handler); err != nil {
 		log.Fatalf("Erreur au démarrage: %v", err)
