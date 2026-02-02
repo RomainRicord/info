@@ -2,49 +2,25 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strings"
-	"time"
 )
 
-// --- CONSTANTES ---
-// Ton token API Societe.com
-const API_TOKEN = "3b8fe35c2885c14c1eaee3248c79472b"
+// --- Structures de Données ---
 
-// --- STRUCTURES DE DONNÉES ---
-
-// 1. Ce que ton Front (React) attend
+// EntrepriseResponse : Structure exacte attendue par ton TypeScript
 type EntrepriseResponse struct {
 	Denomination         string `json:"denomination"`
-	NomComplet           string `json:"nom_complet,omitempty"`
+	NomComplet           string `json:"nom_complet,omitempty"` // Fallback
 	AdressePostaleLegale struct {
 		Ville      string `json:"ville"`
 		CodePostal string `json:"code_postal"`
 	} `json:"adresse_postale_legale"`
 }
 
-// 2. Ce que Societe.com renvoie (Structure partielle pour cibler ce qu'on veut)
-type SocieteComResponse struct {
-	Denomination        string `json:"denomination"`
-	DenominationUsuelle string `json:"denomination_usuelle"`
-	Enseigne            string `json:"enseigne"`
-	// L'adresse peut être à la racine ou dans un objet imbriqué selon les cas
-	Adresse struct {
-		CodePostal string `json:"code_postal"`
-		Ville      string `json:"ville"`
-	} `json:"adresse"`
-	Etablissement struct {
-		Adresse struct {
-			CodePostal string `json:"code_postal"`
-			Ville      string `json:"ville"`
-		} `json:"adresse"`
-	} `json:"etablissement"`
-}
-
-// Structures utilitaires existantes
+// InfoResponse : Structure existante pour /info
 type InfoResponse struct {
 	Status  string `json:"status"`
 	Message string `json:"message"`
@@ -52,32 +28,18 @@ type InfoResponse struct {
 	Error   string `json:"error,omitempty"`
 }
 
+// HealthResponse : Structure existante pour /health
 type HealthResponse struct {
 	Status string `json:"status"`
 	Code   int    `json:"code"`
 }
 
-// --- MIDDLEWARES ---
+// --- Middlewares ---
 
-// CORS corrigé : Gère correctement la liste des origines
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Liste des domaines autorisés
-		allowedOrigins := []string{
-			"http://localhost:8082",
-			"https://vintagestandards.fr",
-			"https://dev.vintagestandards.fr",
-		}
-
-		origin := r.Header.Get("Origin")
-		// On vérifie si l'origine est dans la liste
-		for _, allowed := range allowedOrigins {
-			if origin == allowed {
-				w.Header().Set("Access-Control-Allow-Origin", origin)
-				break
-			}
-		}
-
+		allowedOrigins := "http://localhost:8082/, https://vintagestandards.fr, https://dev.vintagestandards.fr"
+		w.Header().Set("Access-Control-Allow-Origin", allowedOrigins)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
@@ -89,106 +51,42 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// --- LOGIQUE MÉTIER (Appel Externe) ---
+// --- Handlers ---
 
-func fetchSocieteComData(siret string) (*EntrepriseResponse, error) {
-	// Construction de l'URL vers l'API Societe.com
-	url := fmt.Sprintf("https://api.societe.com/api/v1/etablissement/%s", siret)
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	// Ajout du Token d'authentification
-	req.Header.Set("X-Authorization", "socapi "+API_TOKEN)
-	req.Header.Set("Accept", "application/json")
-
-	// Exécution de la requête avec un timeout de 10s
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	// Gestion des codes erreurs
-	if resp.StatusCode == 404 {
-		return nil, fmt.Errorf("SIRET introuvable")
-	}
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("erreur API distante : %d", resp.StatusCode)
-	}
-
-	// Parsing du JSON reçu de Societe.com
-	var apiData SocieteComResponse
-	if err := json.NewDecoder(resp.Body).Decode(&apiData); err != nil {
-		return nil, err
-	}
-
-	// Mapping des données (On transforme le format Societe.com vers ton format React)
-	result := &EntrepriseResponse{}
-
-	// 1. Récupération du nom (On prend le premier qui n'est pas vide)
-	if apiData.Denomination != "" {
-		result.Denomination = apiData.Denomination
-	} else if apiData.DenominationUsuelle != "" {
-		result.Denomination = apiData.DenominationUsuelle
-	} else {
-		result.Denomination = apiData.Enseigne
-	}
-
-	// 2. Récupération de l'adresse (Racine ou Etablissement)
-	if apiData.Adresse.Ville != "" {
-		result.AdressePostaleLegale.Ville = apiData.Adresse.Ville
-		result.AdressePostaleLegale.CodePostal = apiData.Adresse.CodePostal
-	} else {
-		result.AdressePostaleLegale.Ville = apiData.Etablissement.Adresse.Ville
-		result.AdressePostaleLegale.CodePostal = apiData.Etablissement.Adresse.CodePostal
-	}
-
-	return result, nil
-}
-
-// --- HANDLERS ---
-
+// entrepriseHandler : Reçoit le SIRET et renvoie les infos de l'entreprise
 func entrepriseHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	// Extraction du SIRET
+	// Extraction du SIRET depuis l'URL : /api/entreprise/123456789
+	// On retire le préfixe pour garder juste le numéro
 	siret := strings.TrimPrefix(r.URL.Path, "/api/entreprise/")
 	
-	// Validation simple de la longueur
-	if len(siret) != 14 {
+	if siret == "" || siret == "/" {
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Le SIRET doit contenir 14 chiffres"})
+		json.NewEncoder(w).Encode(map[string]string{"error": "SIRET manquant"})
 		return
 	}
 
-	log.Printf("🔍 Appel API Societe.com pour le SIRET : %s", siret)
+	log.Printf("🔍 Recherche demandée pour le SIRET : %s", siret)
 
-	// APPEL RÉEL À L'API
-	data, err := fetchSocieteComData(siret)
+	// --- SIMULATION DE DONNÉES (MOCK) ---
+	// C'est ici que tu appelleras plus tard l'API INSEE réelle.
+	// Pour l'instant, on renvoie une réponse statique pour tester la connexion.
 	
-	if err != nil {
-		log.Printf("❌ Erreur : %v", err)
-		
-		// Si l'entreprise n'existe pas -> 404
-		if err.Error() == "SIRET introuvable" {
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Entreprise non trouvée sur Societe.com"})
-		} else {
-			// Autre erreur (réseau, token, serveur externe HS) -> 500
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		}
-		return
+	response := EntrepriseResponse{
+		Denomination: "VINTAGE STANDARDS STUDIO",
+		AdressePostaleLegale: struct {
+			Ville      string `json:"ville"`
+			CodePostal string `json:"code_postal"`
+		}{
+			Ville:      "PARIS",
+			CodePostal: "75011",
+		},
 	}
 
-	// Succès
-	log.Printf("✅ Données trouvées : %s - %s", data.Denomination, data.AdressePostaleLegale.Ville)
+	// On encode la réponse en JSON pour le TypeScript
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(data)
+	json.NewEncoder(w).Encode(response)
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -222,8 +120,12 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
+	
+	// Routes existantes
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/info", infoHandler)
+	
+	// NOUVELLE ROUTE : Note le "/" à la fin pour capturer ce qui suit (le siret)
 	mux.HandleFunc("/api/entreprise/", entrepriseHandler)
 
 	handler := corsMiddleware(mux)
