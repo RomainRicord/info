@@ -13,51 +13,42 @@ import (
 // --- CONSTANTES ---
 const API_TOKEN = "3b8fe35c2885c14c1eaee3248c79472b"
 
-// --- Structures de Données ---
+// --- STRUCTURES DE DONNÉES ---
 
-// EntrepriseResponse : Structure exacte attendue par ton TypeScript
+// 1. Ce que ton Front (React) attend
+// Note : Comme /exist ne renvoie pas l'adresse, les champs adresse seront vides.
 type EntrepriseResponse struct {
 	Denomination         string `json:"denomination"`
-	NomComplet           string `json:"nom_complet,omitempty"` // Fallback
+	Siren                string `json:"siren"`      // Ajouté pour info
+	Siret                string `json:"siret"`      // Ajouté pour info
 	AdressePostaleLegale struct {
 		Ville      string `json:"ville"`
 		CodePostal string `json:"code_postal"`
 	} `json:"adresse_postale_legale"`
 }
 
-// SocieteComResponse : Structure pour lire la réponse brute de Societe.com
-type SocieteComResponse struct {
-	Denomination        string `json:"denomination"`
-	DenominationUsuelle string `json:"denomination_usuelle"`
-	Enseigne            string `json:"enseigne"`
-	// L'adresse peut être à la racine ou dans un objet imbriqué selon les cas
-	Adresse struct {
-		CodePostal string `json:"code_postal"`
-		Ville      string `json:"ville"`
-	} `json:"adresse"`
-	Etablissement struct {
-		Adresse struct {
-			CodePostal string `json:"code_postal"`
-			Ville      string `json:"ville"`
-		} `json:"adresse"`
-	} `json:"etablissement"`
+// 2. Ce que Societe.com renvoie via l'endpoint /exist
+type SocieteExistResponse struct {
+	Siren      string `json:"siren"`
+	SiretSiege string `json:"siretsiege"`
+	NumTVA     string `json:"numtva"`
+	Deno       string `json:"deno"`           // La raison sociale
+	Status     string `json:"status"`
+	ImmatInsee string `json:"immatinsee"`
 }
 
-// InfoResponse : Structure existante pour /info
+// Structures utilitaires
 type InfoResponse struct {
 	Status  string `json:"status"`
-	Message string `json:"message"`
 	Data    any    `json:"data,omitempty"`
-	Error   string `json:"error,omitempty"`
 }
 
-// HealthResponse : Structure existante pour /health
 type HealthResponse struct {
 	Status string `json:"status"`
 	Code   int    `json:"code"`
 }
 
-// --- Middlewares ---
+// --- MIDDLEWARES ---
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -68,7 +59,6 @@ func corsMiddleware(next http.Handler) http.Handler {
 		}
 
 		origin := r.Header.Get("Origin")
-		// Autorisation dynamique de l'origine
 		for _, allowed := range allowedOrigins {
 			if origin == allowed {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
@@ -88,22 +78,23 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// --- Logique Métier (Le Fetch API) ---
+// --- LOGIQUE MÉTIER (Appel /exist) ---
 
-func fetchSocieteComData(siret string) (*EntrepriseResponse, error) {
-	// Construction de l'URL
-	url := fmt.Sprintf("https://api.societe.com/api/v1/etablissement/%s", siret)
+func fetchSocieteExistData(numid string) (*EntrepriseResponse, error) {
+	// Construction de l'URL vers l'endpoint /exist
+	// numid peut être un SIREN ou un SIRET
+	url := fmt.Sprintf("https://api.societe.com/api/v1/entreprise/%s/exist", numid)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	// Ajout du Token d'authentification
+	// Authentification
 	req.Header.Set("X-Authorization", "socapi "+API_TOKEN)
 	req.Header.Set("Accept", "application/json")
 
-	// Exécution de la requête avec timeout
+	// Exécution
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -111,84 +102,71 @@ func fetchSocieteComData(siret string) (*EntrepriseResponse, error) {
 	}
 	defer resp.Body.Close()
 
-	// Gestion des erreurs HTTP
+	// Gestion des erreurs
 	if resp.StatusCode == 404 {
-		return nil, fmt.Errorf("SIRET introuvable")
+		return nil, fmt.Errorf("entreprise introuvable (numid invalide)")
 	}
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("erreur API distante : %d", resp.StatusCode)
 	}
 
-	// Parsing de la réponse Societe.com
-	var apiData SocieteComResponse
+	// Parsing de la réponse /exist
+	var apiData SocieteExistResponse
 	if err := json.NewDecoder(resp.Body).Decode(&apiData); err != nil {
 		return nil, err
 	}
 
-	// Mapping vers la structure attendue par ton Front
+	// Mapping vers le format Front
 	result := &EntrepriseResponse{}
+	
+	// On récupère le nom (deno)
+	result.Denomination = apiData.Deno
+	
+	// On renvoie aussi les identifiants si besoin
+	result.Siren = apiData.Siren
+	result.Siret = apiData.SiretSiege
 
-	// 1. Logique de récupération du nom
-	if apiData.Denomination != "" {
-		result.Denomination = apiData.Denomination
-	} else if apiData.DenominationUsuelle != "" {
-		result.Denomination = apiData.DenominationUsuelle
-	} else {
-		result.Denomination = apiData.Enseigne
-	}
-
-	// 2. Logique de récupération de l'adresse (Racine ou Imbriqué)
-	if apiData.Adresse.Ville != "" {
-		result.AdressePostaleLegale.Ville = apiData.Adresse.Ville
-		result.AdressePostaleLegale.CodePostal = apiData.Adresse.CodePostal
-	} else {
-		result.AdressePostaleLegale.Ville = apiData.Etablissement.Adresse.Ville
-		result.AdressePostaleLegale.CodePostal = apiData.Etablissement.Adresse.CodePostal
-	}
-
+	// ⚠️ L'endpoint /exist ne donne PAS l'adresse (ville/CP). 
+	// On laisse donc AdressePostaleLegale vide ou on met une valeur par défaut si besoin.
+	
 	return result, nil
 }
 
-// --- Handlers ---
+// --- HANDLERS ---
 
-// entrepriseHandler : Reçoit le SIRET, appelle Societe.com et renvoie le résultat
 func entrepriseHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	// 1. Extraction du SIRET depuis l'URL
-	siret := strings.TrimPrefix(r.URL.Path, "/api/entreprise/")
-
-	// 2. Validation : Un SIRET doit faire 14 caractères
-	if len(siret) != 14 {
+	// Extraction du paramètre (SIREN ou SIRET)
+	numid := strings.TrimPrefix(r.URL.Path, "/api/entreprise/")
+	
+	// Validation : On accepte 9 chiffres (SIREN) OU 14 chiffres (SIRET)
+	if len(numid) != 9 && len(numid) != 14 {
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Le SIRET doit contenir exactement 14 chiffres"})
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "Le paramètre doit être un SIREN (9 chiffres) ou un SIRET (14 chiffres)",
+		})
 		return
 	}
 
-	log.Printf("🔍 Appel API Societe.com pour le SIRET : %s", siret)
+	log.Printf("🔍 Vérification existence (SIREN/SIRET) : %s", numid)
 
-	// 3. APPEL RÉEL (Plus de Mock ici !)
-	// On appelle la fonction fetchSocieteComData définie plus haut
-	data, err := fetchSocieteComData(siret)
-
+	// Appel à la fonction /exist
+	data, err := fetchSocieteExistData(numid)
+	
 	if err != nil {
 		log.Printf("❌ Erreur : %v", err)
-
-		// Gestion fine des erreurs
-		if strings.Contains(err.Error(), "introuvable") || err.Error() == "SIRET introuvable" {
-			// Cas 404 : L'entreprise n'existe pas
+		if strings.Contains(err.Error(), "introuvable") {
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Entreprise introuvable pour ce SIRET"})
+			json.NewEncoder(w).Encode(map[string]string{"error": "Entreprise inconnue"})
 		} else {
-			// Cas 500 : Problème technique (Réseau, Token invalide, API en panne)
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Erreur serveur lors de la communication avec Societe.com"})
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		}
 		return
 	}
 
-	// 4. Succès : On renvoie les vraies données au format JSON
-	log.Printf("✅ Données renvoyées pour : %s", data.Denomination)
+	log.Printf("✅ Trouvé : %s (SIREN: %s)", data.Denomination, data.Siren)
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(data)
 }
@@ -200,23 +178,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 
 func infoHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	queryType := r.URL.Query().Get("type")
-	if queryType == "" {
-		queryType = "system"
-	}
-
-	var data map[string]any
-	switch strings.ToLower(queryType) {
-	case "system":
-		data = map[string]any{"version": "1.0.0", "env": os.Getenv("ENVIRONMENT")}
-	case "timestamp":
-		data = map[string]any{"timestamp": "2026-02-02T12:00:00Z"}
-	default:
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(InfoResponse{Status: "error", Error: "Type inconnu"})
-		return
-	}
-	json.NewEncoder(w).Encode(InfoResponse{Status: "success", Data: data})
+	json.NewEncoder(w).Encode(InfoResponse{Status: "success", Data: map[string]string{"version": "1.0.0"}})
 }
 
 func main() {
@@ -226,18 +188,14 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-
-	// Routes existantes
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/info", infoHandler)
-
-	// NOUVELLE ROUTE : Note le "/" à la fin pour capturer ce qui suit (le siret)
 	mux.HandleFunc("/api/entreprise/", entrepriseHandler)
 
 	handler := corsMiddleware(mux)
 
 	log.Printf("🚀 Serveur démarré sur :%s", port)
-	log.Printf("📍 Route active : GET /api/entreprise/{siret}")
+	log.Printf("📍 Route active : GET /api/entreprise/{siren_ou_siret}")
 
 	if err := http.ListenAndServe(":"+port, handler); err != nil {
 		log.Fatalf("Erreur au démarrage: %v", err)
