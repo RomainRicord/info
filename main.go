@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/smtp"
 	"os"
 	"strings"
 	"time"
@@ -50,6 +51,12 @@ type InfoResponse struct {
 type HealthResponse struct {
 	Status string `json:"status"`
 	Code   int    `json:"code"`
+}
+
+type EmailRequest struct {
+	To      string `json:"to"`
+	Subject string `json:"subject"`
+	Body    string `json:"body"`
 }
 
 // --- MIDDLEWARES ---
@@ -153,7 +160,6 @@ func entrepriseHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("🔍 Vérification existence (SIREN/SIRET) : %s", numid)
 
 	data, err := fetchSocieteExistData(numid)
 
@@ -169,9 +175,73 @@ func entrepriseHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("✅ Trouvé : %s (SIREN: %s)", data.Denomination, data.Siren)
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(data)
+}
+
+func sendEmailHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	// 1. Vérification de la méthode (POST uniquement)
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Méthode non autorisée. Utilisez POST."})
+		return
+	}
+
+	// 2. Décodage du JSON reçu
+	var req EmailRequest
+	
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "JSON invalide"})
+		return
+	}
+
+	// 3. Validation des champs
+	if req.To == "" || req.Subject == "" || req.Body == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Les champs 'to', 'subject' et 'body' sont requis"})
+		return
+	}
+
+	log.Printf("📧 Tentative d'envoi d'email à : %s", req.To)
+
+	// 4. Configuration SMTP (Récupérée des variables d'environnement)
+	smtpHost := os.Getenv("SMTP_HOST") // Exemple Gmail
+	smtpPort := os.Getenv("SMTP_PORT")
+	smtpUser := os.Getenv("SMTP_ADMIN_EMAIL")    // ex: monmail@gmail.com
+	smtpPass := os.Getenv("SMTP_PASSWORD") // ex: mot de passe d'application
+
+	if smtpUser == "" || smtpPass == "" {
+		log.Println("❌ Erreur : Identifiants SMTP manquants dans l'environnement")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Configuration serveur email incorrecte"})
+		return
+	}
+
+	// 5. Construction du message
+	msg := []byte(fmt.Sprintf("To: %s\r\n"+
+		"Subject: %s\r\n"+
+		"MIME-Version: 1.0\r\n"+
+		"Content-Type: text/plain; charset=\"UTF-8\"\r\n"+
+		"\r\n"+
+		"%s\r\n", req.To, req.Subject, req.Body))
+
+	// 6. Envoi
+	auth := smtp.PlainAuth("", smtpUser, smtpPass, smtpHost)
+	err := smtp.SendMail(smtpHost+":"+smtpPort, auth, smtpUser, []string{req.To}, msg)
+
+	if err != nil {
+		log.Printf("❌ Erreur lors de l'envoi SMTP : %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Échec de l'envoi de l'email : " + err.Error()})
+		return
+	}
+
+	log.Printf("✅ Email envoyé avec succès à : %s", req.To)
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Email envoyé avec succès"})
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -194,6 +264,7 @@ func main() {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/info", infoHandler)
 	mux.HandleFunc("/api/entreprise/", entrepriseHandler)
+	mux.HandleFunc("/Send/", sendEmailHandler)
 
 	handler := corsMiddleware(mux)
 
