@@ -3,7 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io" // <--- AJOUTÉ : Nécessaire pour lire le corps de la réponse
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -28,14 +28,16 @@ type EntrepriseResponse struct {
 }
 
 // 2. Ce que Societe.com renvoie via l'endpoint /exist
-// J'ai ajouté des tags json alternatifs fréquents pour maximiser les chances de mapping
+// CORRECTION ICI : On ajoute le niveau "common"
 type SocieteExistResponse struct {
-	Siren      string `json:"siren"`
-	SiretSiege string `json:"siretsiege"` // Vérifie si l'API ne renvoie pas plutôt "siret" ou "siret_siege"
-	NumTVA     string `json:"numtva"`
-	Deno       string `json:"deno"`       // Vérifie si l'API ne renvoie pas plutôt "denomination"
-	Status     string `json:"status"`
-	ImmatInsee string `json:"immatinsee"`
+	Common struct {
+		Siren      string `json:"siren"`
+		SiretSiege string `json:"siretsiege"`
+		NumTVA     string `json:"numtva"`
+		Deno       string `json:"deno"`
+		Status     string `json:"status"`
+		ImmatInsee string `json:"immatinsee"`
+	} `json:"common"`
 }
 
 // Structures utilitaires
@@ -82,7 +84,6 @@ func corsMiddleware(next http.Handler) http.Handler {
 // --- LOGIQUE MÉTIER (Appel /exist) ---
 
 func fetchSocieteExistData(numid string) (*EntrepriseResponse, error) {
-	// Construction de l'URL
 	url := fmt.Sprintf("https://api.societe.com/api/v1/entreprise/%s/exist", numid)
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -90,11 +91,9 @@ func fetchSocieteExistData(numid string) (*EntrepriseResponse, error) {
 		return nil, err
 	}
 
-	// Authentification
 	req.Header.Set("X-Authorization", "socapi "+API_TOKEN)
 	req.Header.Set("Accept", "application/json")
 
-	// Exécution
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -102,43 +101,37 @@ func fetchSocieteExistData(numid string) (*EntrepriseResponse, error) {
 	}
 	defer resp.Body.Close()
 
-	// Lecture du corps de la réponse AVANT de décoder
-	// Cela nous permet d'afficher le JSON brut dans les logs
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 
-	// Gestion des erreurs HTTP
 	if resp.StatusCode == 404 {
 		return nil, fmt.Errorf("entreprise introuvable (numid invalide)")
 	}
+	// Note sur ton erreur 400 précédente : c'était parce que le numéro 112121212 est invalide (mauvais format/checksum).
+	// Le code 321525156 est valide et renvoie 200 OK.
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("erreur API distante : %d - %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	// LOG CRUCIAL : Affiche ce que l'API renvoie vraiment
 	log.Printf("DEBUG - Réponse API brute pour %s : %s", numid, string(bodyBytes))
 
-	// Parsing de la réponse /exist depuis les octets lus
 	var apiData SocieteExistResponse
 	if err := json.Unmarshal(bodyBytes, &apiData); err != nil {
 		return nil, fmt.Errorf("erreur de décodage JSON : %v", err)
 	}
 
-	// Mapping vers le format Front
 	result := &EntrepriseResponse{}
 
-	// On essaie de récupérer la dénomination
-	result.Denomination = apiData.Deno
-	
-	// Si Deno est vide, l'API utilise peut-être un autre champ, regarde les logs !
-	if result.Denomination == "" {
-		log.Println("⚠️ ATTENTION : La dénomination est vide. Vérifie les tags JSON dans SocieteExistResponse.")
-	}
+	// CORRECTION ICI : On doit passer par .Common pour accéder aux données
+	result.Denomination = apiData.Common.Deno
+	result.Siren = apiData.Common.Siren
+	result.Siret = apiData.Common.SiretSiege
 
-	result.Siren = apiData.Siren
-	result.Siret = apiData.SiretSiege
+	if result.Denomination == "" {
+		log.Println("⚠️ ATTENTION : La dénomination est toujours vide. Vérifie si l'API n'a pas changé de structure.")
+	}
 
 	return result, nil
 }
@@ -148,10 +141,8 @@ func fetchSocieteExistData(numid string) (*EntrepriseResponse, error) {
 func entrepriseHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	// Extraction du paramètre (SIREN ou SIRET)
 	numid := strings.TrimPrefix(r.URL.Path, "/api/entreprise/")
 
-	// Validation
 	if len(numid) != 9 && len(numid) != 14 {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{
@@ -162,7 +153,6 @@ func entrepriseHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("🔍 Vérification existence (SIREN/SIRET) : %s", numid)
 
-	// Appel à la fonction /exist
 	data, err := fetchSocieteExistData(numid)
 
 	if err != nil {
