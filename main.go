@@ -21,6 +21,7 @@ type EntrepriseResponse struct {
 	Denomination         string `json:"denomination"`
 	Siren                string `json:"siren"`
 	Siret                string `json:"siret"`
+	Tva                  string `json:"tva"` // <--- AJOUTE CETTE LIGNE
 	AdressePostaleLegale struct {
 		Ville      string `json:"ville"`
 		CodePostal string `json:"code_postal"`
@@ -128,6 +129,7 @@ func fetchSocieteExistData(numid string) (*EntrepriseResponse, error) {
 	result.Denomination = apiData.Common.Deno
 	result.Siren = apiData.Common.Siren
 	result.Siret = apiData.Common.SiretSiege
+	result.Tva = apiData.Common.NumTVA
 
 	if result.Denomination == "" {
 		log.Println("⚠️ ATTENTION : La dénomination est toujours vide. Vérifie si l'API n'a pas changé de structure.")
