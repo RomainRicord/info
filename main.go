@@ -211,7 +211,7 @@ func sendEmailHandler(w http.ResponseWriter, r *http.Request) {
 	smtpHost := os.Getenv("SMTP_HOST") // Exemple Gmail
 	smtpPort := os.Getenv("SMTP_PORT")
 	smtpUser := os.Getenv("SMTP_ADMIN_EMAIL")    // ex: monmail@gmail.com
-	smtpPass := os.Getenv("SMTP_PASSWORD") // ex: mot de passe d'application
+	smtpPass := os.Getenv("SMTP_PASS") // ex: mot de passe d'application
 
 	if smtpUser == "" || smtpPass == "" {
 		log.Println("❌ Erreur : Identifiants SMTP manquants dans l'environnement")
