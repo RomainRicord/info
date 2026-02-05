@@ -19,7 +19,7 @@ const API_TOKEN = "3b8fe35c2885c14c1eaee3248c79472b"
 
 // --- STRUCTURES DE DONNÉES ---
 
-// 1. Structure pour la réponse Entreprise (Envoyée au Front)
+// 1. Structure pour la réponse Entreprise
 type EntrepriseResponse struct {
 	Denomination         string `json:"denomination"`
 	Siren                string `json:"siren"`
@@ -45,9 +45,11 @@ type SocieteExistResponse struct {
 
 // 3. Structure pour la requête d'envoi d'email
 type EmailRequest struct {
-	To      string `json:"to"`
-	Subject string `json:"subject"`
-	Body    string `json:"body"`
+	To             string `json:"to"`
+	Subject        string `json:"subject"`
+	Body           string `json:"body"`
+	AttachmentName string `json:"attachment_name"` // Nom du fichier (ex: devis.pdf)
+	AttachmentData string `json:"attachment_data"` // Contenu en Base64
 }
 
 // Structures utilitaires
@@ -59,6 +61,20 @@ type InfoResponse struct {
 type HealthResponse struct {
 	Status string `json:"status"`
 	Code   int    `json:"code"`
+}
+
+// --- UTILITAIRES ---
+
+// splitLines découpe une longue chaîne (Base64) en lignes de 76 caractères
+// C'est INDISPENSABLE pour respecter le protocole MIME/SMTP
+func splitLines(s string) string {
+	var lines []string
+	for len(s) > 76 {
+		lines = append(lines, s[:76])
+		s = s[76:]
+	}
+	lines = append(lines, s)
+	return strings.Join(lines, "\r\n")
 }
 
 // --- MIDDLEWARES ---
@@ -153,7 +169,7 @@ func entrepriseHandler(w http.ResponseWriter, r *http.Request) {
 			"error": "Le paramètre doit être un SIREN (9 chiffres) ou un SIRET (14 chiffres)",
 		})
 		return
-    }
+	}
 
 	log.Printf("🔍 Vérification existence (SIREN/SIRET) : %s", numid)
 
@@ -176,7 +192,7 @@ func entrepriseHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(data)
 }
 
-// Handler d'envoi d'email (Fix SSL/TLS)
+// Handler d'envoi d'email (Support PDF + Fix SSL/TLS + MIME Fix)
 func sendEmailHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -214,13 +230,55 @@ func sendEmailHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msg := []byte(fmt.Sprintf("To: %s\r\n"+
-		"Subject: %s\r\n"+
-		"MIME-Version: 1.0\r\n"+
-		"Content-Type: text/plain; charset=\"UTF-8\"\r\n"+
-		"\r\n"+
-		"%s\r\n", req.To, req.Subject, req.Body))
+	// Debug : Vérifier si on reçoit le PDF
+	if req.AttachmentData != "" {
+		log.Printf("📎 Backend : PDF reçu ! Taille: %d caractères", len(req.AttachmentData))
+	} else {
+		log.Println("⚠️ Backend : Pas de données PDF reçues")
+	}
 
+	// --- CONSTRUCTION EMAIL (MIME Multipart) ---
+	boundary := "MyBoundarySeparation12345"
+
+	// En-têtes
+	header := make(map[string]string)
+	header["From"] = smtpUser
+	header["To"] = req.To
+	header["Subject"] = req.Subject
+	header["MIME-Version"] = "1.0"
+	header["Content-Type"] = "multipart/mixed; boundary=" + boundary
+
+	message := ""
+	for k, v := range header {
+		message += fmt.Sprintf("%s: %s\r\n", k, v)
+	}
+	message += "\r\n"
+
+	// PARTIE 1 : Corps du texte
+	message += fmt.Sprintf("--%s\r\n", boundary)
+	message += "Content-Type: text/plain; charset=\"utf-8\"\r\n"
+	message += "Content-Transfer-Encoding: 7bit\r\n"
+	message += "\r\n"
+	message += req.Body + "\r\n"
+
+	// PARTIE 2 : Pièce jointe (si présente)
+	if req.AttachmentData != "" && req.AttachmentName != "" {
+		// Nettoyage nom de fichier
+		cleanName := strings.ReplaceAll(req.AttachmentName, "\n", "")
+
+		message += fmt.Sprintf("--%s\r\n", boundary)
+		message += "Content-Type: application/pdf\r\n"
+		message += "Content-Transfer-Encoding: base64\r\n"
+		message += fmt.Sprintf("Content-Disposition: attachment; filename=\"%s\"\r\n", cleanName)
+		message += "\r\n"
+		// IMPORTANT : Découpage du Base64
+		message += splitLines(req.AttachmentData) + "\r\n"
+	}
+
+	message += fmt.Sprintf("--%s--\r\n", boundary)
+
+	// --- ENVOI ---
+	msgBytes := []byte(message)
 	addr := smtpHost + ":" + smtpPort
 	auth := smtp.PlainAuth("", smtpUser, smtpPass, smtpHost)
 
@@ -229,10 +287,10 @@ func sendEmailHandler(w http.ResponseWriter, r *http.Request) {
 	// GESTION SSL (Port 465) vs STARTTLS (587)
 	if smtpPort == "465" {
 		log.Println("🔒 Connexion SSL Implicite détectée (Port 465)")
-		err = sendMail465(addr, auth, smtpUser, []string{req.To}, msg)
+		err = sendMail465(addr, auth, smtpUser, []string{req.To}, msgBytes)
 	} else {
 		log.Println("🔓 Connexion STARTTLS standard")
-		err = smtp.SendMail(addr, auth, smtpUser, []string{req.To}, msg)
+		err = smtp.SendMail(addr, auth, smtpUser, []string{req.To}, msgBytes)
 	}
 
 	if err != nil {
@@ -250,8 +308,7 @@ func sendEmailHandler(w http.ResponseWriter, r *http.Request) {
 // Fonction utilitaire pour gérer le SSL (Port 465)
 func sendMail465(addr string, auth smtp.Auth, from string, to []string, msg []byte) error {
 	host, _, _ := net.SplitHostPort(addr)
-	
-    // Connexion sécurisée directe
+
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: false,
 		ServerName:         host,
@@ -288,7 +345,7 @@ func sendMail465(addr string, auth smtp.Auth, from string, to []string, msg []by
 	w, err := client.Data()
 	if err != nil {
 		return err
-    }
+	}
 	_, err = w.Write(msg)
 	if err != nil {
 		return err
@@ -321,18 +378,17 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/info", infoHandler)
-	
-    // Routes Métier
-    mux.HandleFunc("/api/entreprise/", entrepriseHandler)
-	mux.HandleFunc("/api/send-email", sendEmailHandler) 
-    // J'ai gardé aussi l'ancienne route /Send/ au cas où, pointant vers le même handler
-    mux.HandleFunc("/Send/", sendEmailHandler) 
+
+	// Routes Métier
+	mux.HandleFunc("/api/entreprise/", entrepriseHandler)
+	mux.HandleFunc("/api/send-email", sendEmailHandler)
+	mux.HandleFunc("/Send/", sendEmailHandler) // Alias
 
 	handler := corsMiddleware(mux)
 
 	log.Printf("🚀 Serveur démarré sur :%s", port)
 	log.Printf("📍 Route Entreprise : GET /api/entreprise/{siren}")
-	log.Printf("📍 Route Email      : POST /api/send-email")
+	log.Printf("📍 Route Email      : POST /api/send-email (Support PDF)")
 
 	if err := http.ListenAndServe(":"+port, handler); err != nil {
 		log.Fatalf("Erreur au démarrage: %v", err)
