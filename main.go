@@ -1,10 +1,12 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/smtp"
 	"os"
@@ -17,20 +19,19 @@ const API_TOKEN = "3b8fe35c2885c14c1eaee3248c79472b"
 
 // --- STRUCTURES DE DONNÉES ---
 
-// 1. Ce que ton Front (React) attend
+// 1. Structure pour la réponse Entreprise (Envoyée au Front)
 type EntrepriseResponse struct {
 	Denomination         string `json:"denomination"`
 	Siren                string `json:"siren"`
 	Siret                string `json:"siret"`
-	Tva                  string `json:"tva"` // <--- AJOUTE CETTE LIGNE
+	Tva                  string `json:"tva"`
 	AdressePostaleLegale struct {
 		Ville      string `json:"ville"`
 		CodePostal string `json:"code_postal"`
 	} `json:"adresse_postale_legale"`
 }
 
-// 2. Ce que Societe.com renvoie via l'endpoint /exist
-// CORRECTION ICI : On ajoute le niveau "common"
+// 2. Structure interne API Societe.com
 type SocieteExistResponse struct {
 	Common struct {
 		Siren      string `json:"siren"`
@@ -42,6 +43,13 @@ type SocieteExistResponse struct {
 	} `json:"common"`
 }
 
+// 3. Structure pour la requête d'envoi d'email
+type EmailRequest struct {
+	To      string `json:"to"`
+	Subject string `json:"subject"`
+	Body    string `json:"body"`
+}
+
 // Structures utilitaires
 type InfoResponse struct {
 	Status string `json:"status"`
@@ -51,12 +59,6 @@ type InfoResponse struct {
 type HealthResponse struct {
 	Status string `json:"status"`
 	Code   int    `json:"code"`
-}
-
-type EmailRequest struct {
-	To      string `json:"to"`
-	Subject string `json:"subject"`
-	Body    string `json:"body"`
 }
 
 // --- MIDDLEWARES ---
@@ -117,8 +119,7 @@ func fetchSocieteExistData(numid string) (*EntrepriseResponse, error) {
 	if resp.StatusCode == 404 {
 		return nil, fmt.Errorf("entreprise introuvable (numid invalide)")
 	}
-	// Note sur ton erreur 400 précédente : c'était parce que le numéro 112121212 est invalide (mauvais format/checksum).
-	// Le code 321525156 est valide et renvoie 200 OK.
+
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("erreur API distante : %d - %s", resp.StatusCode, string(bodyBytes))
 	}
@@ -131,16 +132,10 @@ func fetchSocieteExistData(numid string) (*EntrepriseResponse, error) {
 	}
 
 	result := &EntrepriseResponse{}
-
-	// CORRECTION ICI : On doit passer par .Common pour accéder aux données
 	result.Denomination = apiData.Common.Deno
 	result.Siren = apiData.Common.Siren
 	result.Siret = apiData.Common.SiretSiege
 	result.Tva = apiData.Common.NumTVA
-
-	if result.Denomination == "" {
-		log.Println("⚠️ ATTENTION : La dénomination est toujours vide. Vérifie si l'API n'a pas changé de structure.")
-	}
 
 	return result, nil
 }
@@ -158,8 +153,9 @@ func entrepriseHandler(w http.ResponseWriter, r *http.Request) {
 			"error": "Le paramètre doit être un SIREN (9 chiffres) ou un SIRET (14 chiffres)",
 		})
 		return
-	}
+    }
 
+	log.Printf("🔍 Vérification existence (SIREN/SIRET) : %s", numid)
 
 	data, err := fetchSocieteExistData(numid)
 
@@ -175,52 +171,49 @@ func entrepriseHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log.Printf("✅ Trouvé : %s (SIREN: %s)", data.Denomination, data.Siren)
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(data)
 }
 
+// Handler d'envoi d'email (Fix SSL/TLS)
 func sendEmailHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	// 1. Vérification de la méthode (POST uniquement)
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Méthode non autorisée. Utilisez POST."})
 		return
 	}
 
-	// 2. Décodage du JSON reçu
 	var req EmailRequest
-	
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "JSON invalide"})
 		return
 	}
 
-	// 3. Validation des champs
 	if req.To == "" || req.Subject == "" || req.Body == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Les champs 'to', 'subject' et 'body' sont requis"})
 		return
 	}
 
-	log.Printf("📧 Tentative d'envoi d'email à : %s", req.To)
-
-	// 4. Configuration SMTP (Récupérée des variables d'environnement)
-	smtpHost := os.Getenv("SMTP_HOST") // Exemple Gmail
+	// --- RECUPERATION ENV ---
+	smtpHost := os.Getenv("SMTP_HOST")
 	smtpPort := os.Getenv("SMTP_PORT")
-	smtpUser := os.Getenv("SMTP_ADMIN_EMAIL")    // ex: monmail@gmail.com
-	smtpPass := os.Getenv("SMTP_PASS") // ex: mot de passe d'application
+	smtpUser := os.Getenv("SMTP_ADMIN_EMAIL")
+	smtpPass := os.Getenv("SMTP_PASS")
 
-	if smtpUser == "" || smtpPass == "" {
-		log.Println("❌ Erreur : Identifiants SMTP manquants dans l'environnement")
+	log.Printf("📧 Config SMTP -> Host: %s | Port: %s | User: %s", smtpHost, smtpPort, smtpUser)
+
+	if smtpHost == "" || smtpPort == "" || smtpUser == "" || smtpPass == "" {
+		log.Println("❌ Erreur : Configuration SMTP incomplète (ENV)")
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Configuration serveur email incorrecte"})
+		json.NewEncoder(w).Encode(map[string]string{"error": "Configuration serveur email incomplète"})
 		return
 	}
 
-	// 5. Construction du message
 	msg := []byte(fmt.Sprintf("To: %s\r\n"+
 		"Subject: %s\r\n"+
 		"MIME-Version: 1.0\r\n"+
@@ -228,20 +221,83 @@ func sendEmailHandler(w http.ResponseWriter, r *http.Request) {
 		"\r\n"+
 		"%s\r\n", req.To, req.Subject, req.Body))
 
-	// 6. Envoi
+	addr := smtpHost + ":" + smtpPort
 	auth := smtp.PlainAuth("", smtpUser, smtpPass, smtpHost)
-	err := smtp.SendMail(smtpHost+":"+smtpPort, auth, smtpUser, []string{req.To}, msg)
+
+	var err error
+
+	// GESTION SSL (Port 465) vs STARTTLS (587)
+	if smtpPort == "465" {
+		log.Println("🔒 Connexion SSL Implicite détectée (Port 465)")
+		err = sendMail465(addr, auth, smtpUser, []string{req.To}, msg)
+	} else {
+		log.Println("🔓 Connexion STARTTLS standard")
+		err = smtp.SendMail(addr, auth, smtpUser, []string{req.To}, msg)
+	}
 
 	if err != nil {
 		log.Printf("❌ Erreur lors de l'envoi SMTP : %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Échec de l'envoi de l'email : " + err.Error()})
+		json.NewEncoder(w).Encode(map[string]string{"error": "Échec de l'envoi : " + err.Error()})
 		return
 	}
 
 	log.Printf("✅ Email envoyé avec succès à : %s", req.To)
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"message": "Email envoyé avec succès"})
+}
+
+// Fonction utilitaire pour gérer le SSL (Port 465)
+func sendMail465(addr string, auth smtp.Auth, from string, to []string, msg []byte) error {
+	host, _, _ := net.SplitHostPort(addr)
+	
+    // Connexion sécurisée directe
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: false,
+		ServerName:         host,
+	}
+
+	conn, err := tls.Dial("tcp", addr, tlsConfig)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	client, err := smtp.NewClient(conn, host)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	if auth != nil {
+		if ok, _ := client.Extension("AUTH"); ok {
+			if err = client.Auth(auth); err != nil {
+				return err
+			}
+		}
+	}
+
+	if err = client.Mail(from); err != nil {
+		return err
+	}
+	for _, addr := range to {
+		if err = client.Rcpt(addr); err != nil {
+			return err
+		}
+	}
+	w, err := client.Data()
+	if err != nil {
+		return err
+    }
+	_, err = w.Write(msg)
+	if err != nil {
+		return err
+	}
+	err = w.Close()
+	if err != nil {
+		return err
+	}
+	return client.Quit()
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -254,6 +310,8 @@ func infoHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(InfoResponse{Status: "success", Data: map[string]string{"version": "1.0.0"}})
 }
 
+// --- MAIN ---
+
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -263,13 +321,18 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/info", infoHandler)
-	mux.HandleFunc("/api/entreprise/", entrepriseHandler)
-	mux.HandleFunc("/Send/", sendEmailHandler)
+	
+    // Routes Métier
+    mux.HandleFunc("/api/entreprise/", entrepriseHandler)
+	mux.HandleFunc("/api/send-email", sendEmailHandler) 
+    // J'ai gardé aussi l'ancienne route /Send/ au cas où, pointant vers le même handler
+    mux.HandleFunc("/Send/", sendEmailHandler) 
 
 	handler := corsMiddleware(mux)
 
 	log.Printf("🚀 Serveur démarré sur :%s", port)
-	log.Printf("📍 Route active : GET /api/entreprise/{siren_ou_siret}")
+	log.Printf("📍 Route Entreprise : GET /api/entreprise/{siren}")
+	log.Printf("📍 Route Email      : POST /api/send-email")
 
 	if err := http.ListenAndServe(":"+port, handler); err != nil {
 		log.Fatalf("Erreur au démarrage: %v", err)
