@@ -84,7 +84,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 		allowedOrigins := []string{
 			"http://localhost:8082",
 			"https://vintagestandards.fr",
-			"https://dev.vintagestandards.fr",
+			"https://dev.vintagestandards.fr/",
 		}
 
 		origin := r.Header.Get("Origin")
